@@ -17,7 +17,7 @@ from jaxtyping import Float, Int
 
 from transformer_lens.FactoredMatrix import FactoredMatrix
 from transformer_lens.hook_points import HookPoint
-from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
+from transformer_lens.HookedTransformerConfig import HookedTransformerConfig, HookedViTConfig
 from transformer_lens.past_key_value_caching import HookedTransformerKeyValueCacheEntry
 from transformer_lens.utils import gelu_fast, gelu_new, get_offset_position_ids, solu
 
@@ -184,6 +184,91 @@ class BertEmbed(nn.Module):
         if token_type_ids is None:
             token_type_ids = torch.zeros_like(input_ids)
 
+        word_embeddings_out = self.hook_embed(self.embed(input_ids))
+        position_embeddings_out = self.hook_pos_embed(self.pos_embed(index_ids))
+        token_type_embeddings_out = self.hook_token_type_embed(
+            self.token_type_embed(token_type_ids)
+        )
+
+        embeddings_out = (
+            word_embeddings_out + position_embeddings_out + token_type_embeddings_out
+        )
+        layer_norm_out = self.ln(embeddings_out)
+        return layer_norm_out
+    
+   
+class PatchEmbed(nn.Module):
+    """
+    Turns an input of size `(batch_size, num_channels, height, width)` -> patch embeddings of shape `(batch_size, seq_length, d_model)`. 
+    Used by the ViTEmbed class. 
+    """
+
+    def __init__(self, cfg: Union[Dict, HookedViTConfig]):
+        super().__init__()
+        if isinstance(cfg, Dict):
+            cfg = HookedViTConfig.from_dict(cfg)
+        self.cfg = cfg
+        
+        image_size, patch_size = cfg.image_size, cfg.patch_size
+        num_channels, d_model = cfg.num_channels, cfg.d_model
+        
+        image_size = image_size if isinstance(image_size, Tuple) else (image_size, image_size)
+        patch_size = patch_size if isinstance(patch_size, Tuple) else (patch_size, patch_size)
+        num_patches = (image_size[1] // patch_size[1]) * (image_size[0] // patch_size[0])
+        self.image_size = image_size
+        self.patch_size = patch_size
+        self.num_channels = num_channels
+        self.num_patches = num_patches
+        
+        self.projection = nn.Conv2d(num_channels, d_model, kernel_size=patch_size, stride=patch_size)
+
+    def forward(
+        self,
+        pixel_values: Int[torch.Tensor, "batch num_channels height width"],
+    ):
+        batch_size, num_channels, height, width = pixel_values.shape
+        assert ( 
+            num_channels == self.num_channels
+            ), f"Make sure that the channel dimension of the pixel values match with the one set in the configuration. Expected {self.num_channels} but got {num_channels}."
+        assert (
+            height == self.image_size[0] and width == self.image_size[1]
+            ), f"Input image size ({height}*{width}) doesn't match model. Expected ({self.image_size[0]}*{self.image_size[1]})."
+        
+        embeddings = self.projection(pixel_values).flatten(2).transpose(1, 2)
+        return embeddings
+   
+   
+class ViTEmbed(nn.Module):
+    """
+    Custom embedding layer for a ViT model. 
+    """
+
+    def __init__(self, cfg: Union[Dict, HookedViTConfig]):
+        super().__init__()
+        if isinstance(cfg, Dict):
+            cfg = HookedViTConfig.from_dict(cfg)
+        self.cfg = cfg
+        
+        self.embed = PatchEmbed(cfg)  # Patchify and embed
+        self.cls_token = nn.Parameter(torch.randn(1, 1, cfg.d_model))
+        self.pos_embed = PosEmbed(cfg)
+
+        self.hook_embed = HookPoint()
+        self.hook_pos_embed = HookPoint()
+
+    def forward(
+        self,
+        pixel_values: Int[torch.Tensor, "batch num_channels height width"]
+    ):
+        batch_size, num_channels, height, width = pixel_values.shape
+        patch_embeddings_out = self.hook_embed(self.embed(pixel_values))
+        
+        # Add CLS token
+        cls_tokens = self.cls_token.expand(batch_size, -1, -1)
+        embeddings = torch.cat((cls_tokens, patch_embeddings_out), dim=1)
+        
+        position_embeddings_out = self.hook_pos_embed(self.pos_embed(index_ids))
+        
         word_embeddings_out = self.hook_embed(self.embed(input_ids))
         position_embeddings_out = self.hook_pos_embed(self.pos_embed(index_ids))
         token_type_embeddings_out = self.hook_token_type_embed(
