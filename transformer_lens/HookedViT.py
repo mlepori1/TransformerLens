@@ -26,7 +26,7 @@ from transformer_lens.hook_points import HookedRootModule, HookPoint
 from transformer_lens.utilities import devices
 
 
-class HookedEncoder(HookedRootModule):
+class HookedViT(HookedRootModule):
     """
     TODO: rewrite
     This class implements a BERT-style encoder using the components in ./components.py, with HookPoints on every interesting activation. It inherits from HookedRootModule.
@@ -180,7 +180,7 @@ class HookedEncoder(HookedRootModule):
         move_to_device=True,
         dtype=torch.float32,
         **from_pretrained_kwargs,
-    ) -> HookedEncoder:
+    ) -> HookedViT:
         """Loads in the pretrained weights from huggingface. Currently supports loading weight from HuggingFace BertForMaskedLM. Unlike HookedTransformer, this does not yet do any preprocessing on the model."""
         logging.warning(
             "Support for BERT in TransformerLens is currently experimental, until such a time when it has feature "
