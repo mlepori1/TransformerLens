@@ -17,7 +17,8 @@ from jaxtyping import Float, Int
 
 from transformer_lens.FactoredMatrix import FactoredMatrix
 from transformer_lens.hook_points import HookPoint
-from transformer_lens.HookedTransformerConfig import HookedTransformerConfig, HookedViTConfig
+from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
+from transformer_lens.HookedViTConfig import HookedViTConfig
 from transformer_lens.past_key_value_caching import HookedTransformerKeyValueCacheEntry
 from transformer_lens.utils import gelu_fast, gelu_new, get_offset_position_ids, solu
 
