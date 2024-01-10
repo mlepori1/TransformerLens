@@ -138,6 +138,8 @@ OFFICIAL_MODEL_NAMES = [
     "stabilityai/stablelm-tuned-alpha-7b",
     "bigscience/bloom-560m",
     "bigcode/santacoder",
+    ### Edits @MLEPORI 
+    "google/vit-base-patch16-224"
 ]
 """Official model names for models on HuggingFace."""
 
@@ -498,6 +500,8 @@ MODEL_ALIASES = {
     ],
     "bigscience/bloom-560m": ["bloom-560m"],
     "bigcode/santacoder": ["santacoder"],
+    # EDITS @MLEPORI
+    "google/vit-base-patch16-224": ["vit"],
 }
 """Model aliases for models on HuggingFace."""
 
@@ -1670,6 +1674,71 @@ def convert_bert_weights(bert, cfg: HookedTransformerConfig):
 
     return state_dict
 
+### EDITS @mlepori
+def convert_vit_weights(vit, cfg: HookedTransformerConfig):
+    # Takes in a ViTForImageClassification Model
+    embeddings = vit.vit.embeddings
+    state_dict = {
+        "embed.embed.projection.weight": embeddings.patch_embeddings.projection.weight,
+        "embed.embed.projection.bias": embeddings.patch_embeddings.projection.bias,
+        "embed.embed.cls_token": embeddings.cls_token.weight,
+        "embed.pos_embed.W_pos": embeddings.position_embeddings.weight,
+    }
+
+    for l in range(cfg.n_layers):
+        block = vit.vit.encoder.layer[l]
+        state_dict[f"blocks.{l}.attn.W_Q"] = einops.rearrange(
+            block.attention.attention.query.weight, "(i h) m -> i m h", i=cfg.n_heads
+        )
+        state_dict[f"blocks.{l}.attn.b_Q"] = einops.rearrange(
+            block.attention.attention.query.bias, "(i h) -> i h", i=cfg.n_heads
+        )
+        state_dict[f"blocks.{l}.attn.W_K"] = einops.rearrange(
+            block.attention.attention.key.weight, "(i h) m -> i m h", i=cfg.n_heads
+        )
+        state_dict[f"blocks.{l}.attn.b_K"] = einops.rearrange(
+            block.attention.attention.key.bias, "(i h) -> i h", i=cfg.n_heads
+        )
+        state_dict[f"blocks.{l}.attn.W_V"] = einops.rearrange(
+            block.attention.attention.value.weight, "(i h) m -> i m h", i=cfg.n_heads
+        )
+        state_dict[f"blocks.{l}.attn.b_V"] = einops.rearrange(
+            block.attention.attention.value.bias, "(i h) -> i h", i=cfg.n_heads
+        )
+        state_dict[f"blocks.{l}.attn.W_O"] = einops.rearrange(
+            block.attention.output.dense.weight,
+            "m (i h) -> i h m",
+            i=cfg.n_heads,
+        )
+
+        state_dict[f"blocks.{l}.attn.b_O"] = block.attention.output.dense.bias
+
+        ### @todo Stopped here
+        
+        state_dict[f"blocks.{l}.ln1.w"] = block.attention.output.LayerNorm.weight
+        state_dict[f"blocks.{l}.ln1.b"] = block.attention.output.LayerNorm.bias
+        state_dict[f"blocks.{l}.mlp.W_in"] = einops.rearrange(
+            block.intermediate.dense.weight, "mlp model -> model mlp"
+        )
+        state_dict[f"blocks.{l}.mlp.b_in"] = block.intermediate.dense.bias
+        state_dict[f"blocks.{l}.mlp.W_out"] = einops.rearrange(
+            block.output.dense.weight, "model mlp -> mlp model"
+        )
+        state_dict[f"blocks.{l}.mlp.b_out"] = block.output.dense.bias
+        state_dict[f"blocks.{l}.ln2.w"] = block.output.LayerNorm.weight
+        state_dict[f"blocks.{l}.ln2.b"] = block.output.LayerNorm.bias
+
+    mlm_head = bert.cls.predictions
+    state_dict["mlm_head.W"] = mlm_head.transform.dense.weight
+    state_dict["mlm_head.b"] = mlm_head.transform.dense.bias
+    state_dict["mlm_head.ln.w"] = mlm_head.transform.LayerNorm.weight
+    state_dict["mlm_head.ln.b"] = mlm_head.transform.LayerNorm.bias
+    # Note: BERT uses tied embeddings
+    state_dict["unembed.W_U"] = embeddings.word_embeddings.weight.T
+    # "unembed.W_U": mlm_head.decoder.weight.T,
+    state_dict["unembed.b_U"] = mlm_head.bias
+
+    return state_dict
 
 def convert_bloom_weights(bloom, cfg: HookedTransformerConfig):
     state_dict = {}
