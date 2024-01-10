@@ -21,7 +21,7 @@ from typing_extensions import Literal
 
 import transformer_lens.loading_from_pretrained as loading
 from transformer_lens import ActivationCache, FactoredMatrix, HookedViTConfig
-from transformer_lens.components import TransformerBlock, BertEmbed, BertMLMHead, Unembed
+from transformer_lens.components import TransformerBlock, ViTEmbed, ViTHead
 from transformer_lens.hook_points import HookedRootModule, HookPoint
 from transformer_lens.utilities import devices
 
@@ -54,12 +54,11 @@ class HookedEncoder(HookedRootModule):
             self.cfg.n_devices == 1
         ), "Multiple devices not supported for HookedViT"
 
-        self.embed = BertEmbed(self.cfg)
+        self.embed = ViTEmbed(self.cfg)
         self.blocks = nn.ModuleList(
             [TransformerBlock(self.cfg) for _ in range(self.cfg.n_layers)]
         )
-        self.mlm_head = BertMLMHead(cfg)
-        self.unembed = Unembed(self.cfg)
+        self.classifier_head = ViTHead(cfg)
 
         self.hook_full_embed = HookPoint()
 
@@ -71,80 +70,59 @@ class HookedEncoder(HookedRootModule):
     @overload
     def forward(
         self,
-        input: Int[torch.Tensor, "batch pos"],
+        input: Int[torch.Tensor, "batch num_channels height width"],
         return_type: Literal["logits"],
         token_type_ids: Optional[Int[torch.Tensor, "batch pos"]] = None,
         one_zero_attention_mask: Optional[Int[torch.Tensor, "batch pos"]] = None,
-    ) -> Float[torch.Tensor, "batch pos d_vocab"]:
+    ) -> Float[torch.Tensor, "batch pos num_labels"]:
         ...
 
     @overload
     def forward(
         self,
-        input: Int[torch.Tensor, "batch pos"],
+        input: Int[torch.Tensor, "batch num_channels height width"],
         return_type: Literal[None],
         token_type_ids: Optional[Int[torch.Tensor, "batch pos"]] = None,
         one_zero_attention_mask: Optional[Int[torch.Tensor, "batch pos"]] = None,
-    ) -> Optional[Float[torch.Tensor, "batch pos d_vocab"]]:
+    ) -> Optional[Float[torch.Tensor, "batch pos num_labels"]]:
         ...
 
     def forward(
         self,
-        input: Int[torch.Tensor, "batch pos"],
-        return_type: Optional[str] = "logits",
-        token_type_ids: Optional[Int[torch.Tensor, "batch pos"]] = None,
-        one_zero_attention_mask: Optional[Int[torch.Tensor, "batch pos"]] = None,
-    ) -> Optional[Float[torch.Tensor, "batch pos d_vocab"]]:
-        """Input must be a batch of tokens. Strings and lists of strings are not yet supported.
+        input: Int[torch.Tensor, "batch num_channels height width"],
+        return_type: Optional[str] = "logits"
+    ) -> Optional[Float[torch.Tensor, "batch pos num_labels"]]:
+        """Input must be a batch of images. 
 
         return_type Optional[str]: The type of output to return. Can be one of: None (return nothing, don't calculate logits), or 'logits' (return logits).
-
-        token_type_ids Optional[torch.Tensor]: Binary ids indicating whether a token belongs to sequence A or B. For example, for two sentences: "[CLS] Sentence A [SEP] Sentence B [SEP]", token_type_ids would be [0, 0, ..., 0, 1, ..., 1, 1]. `0` represents tokens from Sentence A, `1` from Sentence B. If not provided, BERT assumes a single sequence input. Typically, shape is (batch_size, sequence_length).
-
-        one_zero_attention_mask: Optional[torch.Tensor]: A binary mask which indicates which tokens should be attended to (1) and which should be ignored (0). Primarily used for padding variable-length sentences in a batch. For instance, in a batch with sentences of differing lengths, shorter sentences are padded with 0s on the right. If not provided, the model assumes all tokens should be attended to.
         """
 
-        tokens = input
+        ims = input
 
-        if tokens.device.type != self.cfg.device:
-            tokens = tokens.to(self.cfg.device)
-            if one_zero_attention_mask is not None:
-                one_zero_attention_mask = one_zero_attention_mask.to(self.cfg.device)
+        if ims.device.type != self.cfg.device:
+            ims = ims.to(self.cfg.device)
 
-        resid = self.hook_full_embed(self.embed(tokens, token_type_ids))
-
-        large_negative_number = -torch.inf
-        mask = (
-            repeat(1 - one_zero_attention_mask, "batch pos -> batch 1 1 pos")
-            if one_zero_attention_mask is not None
-            else None
-        )
-        additive_attention_mask = (
-            torch.where(mask == 1, large_negative_number, 0)
-            if mask is not None
-            else None
-        )
+        resid = self.hook_full_embed(self.embed(ims))
 
         for block in self.blocks:
-            resid = block(resid, additive_attention_mask)
-        resid = self.mlm_head(resid)
+            resid = block(resid)
+        logits = self.classifier_head(resid)
 
         if return_type is None:
             return
 
-        logits = self.unembed(resid)
         return logits
 
     @overload
     def run_with_cache(
         self, *model_args, return_cache_object: Literal[True] = True, **kwargs
-    ) -> Tuple[Float[torch.Tensor, "batch pos d_vocab"], ActivationCache]:
+    ) -> Tuple[Float[torch.Tensor, "batch pos num_labels"], ActivationCache]:
         ...
 
     @overload
     def run_with_cache(
         self, *model_args, return_cache_object: Literal[False] = False, **kwargs
-    ) -> Tuple[Float[torch.Tensor, "batch pos d_vocab"], Dict[str, torch.Tensor]]:
+    ) -> Tuple[Float[torch.Tensor, "batch pos num_labels"], Dict[str, torch.Tensor]]:
         ...
 
     def run_with_cache(
@@ -154,7 +132,7 @@ class HookedEncoder(HookedRootModule):
         remove_batch_dim: bool = False,
         **kwargs,
     ) -> Tuple[
-        Float[torch.Tensor, "batch pos d_vocab"],
+        Float[torch.Tensor, "batch pos num_labels"],
         Union[ActivationCache, Dict[str, torch.Tensor]],
     ]:
         """
@@ -252,29 +230,18 @@ class HookedEncoder(HookedRootModule):
         return model
 
     @property
-    def W_U(self) -> Float[torch.Tensor, "d_model d_vocab"]:
-        """
-        Convenience to get the unembedding matrix (ie the linear map from the final residual stream to the output logits)
-        """
-        return self.unembed.W_U
-
-    @property
-    def b_U(self) -> Float[torch.Tensor, "d_vocab"]:
-        return self.unembed.b_U
-
-    @property
     def W_E(self) -> Float[torch.Tensor, "d_vocab d_model"]:
         """
         Convenience to get the embedding matrix
         """
-        return self.embed.embed.W_E
+        return self.embed.embed.projection.weight
 
     @property
     def W_pos(self) -> Float[torch.Tensor, "n_ctx d_model"]:
         """
         Convenience function to get the positional embedding. Only works on models with absolute positional embeddings!
         """
-        return self.embed.pos_embed.W_pos
+        return self.embed.pos_embed.data
 
     @property
     def W_E_pos(self) -> Float[torch.Tensor, "d_vocab+n_ctx d_model"]:
@@ -287,84 +254,84 @@ class HookedEncoder(HookedRootModule):
     def W_K(self) -> Float[torch.Tensor, "n_layers n_heads d_model d_head"]:
         """Stacks the key weights across all layers"""
         return torch.stack(
-            [cast(BertBlock, block).attn.W_K for block in self.blocks], dim=0
+            [block.attn.W_K for block in self.blocks], dim=0
         )
 
     @property
     def W_Q(self) -> Float[torch.Tensor, "n_layers n_heads d_model d_head"]:
         """Stacks the query weights across all layers"""
         return torch.stack(
-            [cast(BertBlock, block).attn.W_Q for block in self.blocks], dim=0
+            [block.attn.W_Q for block in self.blocks], dim=0
         )
 
     @property
     def W_V(self) -> Float[torch.Tensor, "n_layers n_heads d_model d_head"]:
         """Stacks the value weights across all layers"""
         return torch.stack(
-            [cast(BertBlock, block).attn.W_V for block in self.blocks], dim=0
+            [block.attn.W_V for block in self.blocks], dim=0
         )
 
     @property
     def W_O(self) -> Float[torch.Tensor, "n_layers n_heads d_head d_model"]:
         """Stacks the attn output weights across all layers"""
         return torch.stack(
-            [cast(BertBlock, block).attn.W_O for block in self.blocks], dim=0
+            [block.attn.W_O for block in self.blocks], dim=0
         )
 
     @property
     def W_in(self) -> Float[torch.Tensor, "n_layers d_model d_mlp"]:
         """Stacks the MLP input weights across all layers"""
         return torch.stack(
-            [cast(BertBlock, block).mlp.W_in for block in self.blocks], dim=0
+            [block.mlp.W_in for block in self.blocks], dim=0
         )
 
     @property
     def W_out(self) -> Float[torch.Tensor, "n_layers d_mlp d_model"]:
         """Stacks the MLP output weights across all layers"""
         return torch.stack(
-            [cast(BertBlock, block).mlp.W_out for block in self.blocks], dim=0
+            [block.mlp.W_out for block in self.blocks], dim=0
         )
 
     @property
     def b_K(self) -> Float[torch.Tensor, "n_layers n_heads d_head"]:
         """Stacks the key biases across all layers"""
         return torch.stack(
-            [cast(BertBlock, block).attn.b_K for block in self.blocks], dim=0
+            [block.attn.b_K for block in self.blocks], dim=0
         )
 
     @property
     def b_Q(self) -> Float[torch.Tensor, "n_layers n_heads d_head"]:
         """Stacks the query biases across all layers"""
         return torch.stack(
-            [cast(BertBlock, block).attn.b_Q for block in self.blocks], dim=0
+            [block.attn.b_Q for block in self.blocks], dim=0
         )
 
     @property
     def b_V(self) -> Float[torch.Tensor, "n_layers n_heads d_head"]:
         """Stacks the value biases across all layers"""
         return torch.stack(
-            [cast(BertBlock, block).attn.b_V for block in self.blocks], dim=0
+            [block.attn.b_V for block in self.blocks], dim=0
         )
 
     @property
     def b_O(self) -> Float[torch.Tensor, "n_layers d_model"]:
         """Stacks the attn output biases across all layers"""
         return torch.stack(
-            [cast(BertBlock, block).attn.b_O for block in self.blocks], dim=0
+            [block.attn.b_O for block in self.blocks], dim=0
         )
 
     @property
     def b_in(self) -> Float[torch.Tensor, "n_layers d_mlp"]:
         """Stacks the MLP input biases across all layers"""
         return torch.stack(
-            [cast(BertBlock, block).mlp.b_in for block in self.blocks], dim=0
+            [block.mlp.b_in for block in self.blocks], dim=0
         )
 
     @property
     def b_out(self) -> Float[torch.Tensor, "n_layers d_model"]:
         """Stacks the MLP output biases across all layers"""
         return torch.stack(
-            [cast(BertBlock, block).mlp.b_out for block in self.blocks], dim=0
+            [block.mlp.b_out for block in self.blocks], dim=0
         )
 
     @property

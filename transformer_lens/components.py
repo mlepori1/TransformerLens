@@ -251,7 +251,8 @@ class ViTEmbed(nn.Module):
         
         self.embed = PatchEmbed(cfg)  # Patchify and embed
         self.cls_token = nn.Parameter(torch.randn(1, 1, cfg.d_model))
-        self.pos_embed = PosEmbed(cfg)
+        num_patches = self.embed.num_patches
+        self.pos_embed = nn.Parameter(torch.randn(1, num_patches + 1, cfg.d_model))  # Plus the CLS token in dim 1
 
         self.hook_embed = HookPoint()
         self.hook_pos_embed = HookPoint()
@@ -267,19 +268,9 @@ class ViTEmbed(nn.Module):
         cls_tokens = self.cls_token.expand(batch_size, -1, -1)
         embeddings = torch.cat((cls_tokens, patch_embeddings_out), dim=1)
         
-        position_embeddings_out = self.hook_pos_embed(self.pos_embed(index_ids))
-        
-        word_embeddings_out = self.hook_embed(self.embed(input_ids))
-        position_embeddings_out = self.hook_pos_embed(self.pos_embed(index_ids))
-        token_type_embeddings_out = self.hook_token_type_embed(
-            self.token_type_embed(token_type_ids)
-        )
-
-        embeddings_out = (
-            word_embeddings_out + position_embeddings_out + token_type_embeddings_out
-        )
-        layer_norm_out = self.ln(embeddings_out)
-        return layer_norm_out
+        position_embeddings_out = embeddings + self.hook_pos_embed(self.pos_embed)
+    
+        return position_embeddings_out
 
 
 class BertMLMHead(nn.Module):
@@ -308,6 +299,33 @@ class BertMLMHead(nn.Module):
         )
         resid = self.act_fn(resid)
         resid = self.ln(resid)
+        return resid
+    
+    
+class ViTHead(nn.Module):
+    """
+    Transforms ViT embeddings into logits (for classification). 
+    """
+
+    def __init__(self, cfg: Union[Dict, HookedViTConfig]):
+        super().__init__()
+        if isinstance(cfg, Dict):
+            cfg = HookedViTConfig.from_dict(cfg)
+        self.cfg = cfg
+        self.ln = LayerNorm(cfg)
+        self.W = nn.Parameter(torch.empty(cfg.num_labels, cfg.d_model, dtype=cfg.dtype))
+        self.b = nn.Parameter(torch.zeros(cfg.num_labels, dtype=cfg.dtype))
+
+    def forward(self, resid: Float[torch.Tensor, "batch pos d_model"]) -> torch.Tensor:
+        resid = self.ln(resid)
+        resid = (
+            einsum(
+                "batch pos d_model, num_labels d_model_in -> batch pos num_labels",
+                resid,
+                self.W,
+            )
+            + self.b
+        )
         return resid
 
 
