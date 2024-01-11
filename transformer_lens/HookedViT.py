@@ -16,17 +16,16 @@ import torch
 from einops import repeat
 from jaxtyping import Float, Int
 from torch import nn
-from transformers import AutoTokenizer
 from typing_extensions import Literal
 
 import transformer_lens.loading_from_pretrained as loading
 from transformer_lens import ActivationCache, FactoredMatrix, HookedViTConfig
-from transformer_lens.components import TransformerBlock, ViTEmbed, ViTHead
+from transformer_lens.components import TransformerBlock, BertBlock, ViTEmbed, ViTHead
 from transformer_lens.hook_points import HookedRootModule, HookPoint
 from transformer_lens.utilities import devices
 
 
-class HookedEncoder(HookedRootModule):
+class HookedViT(HookedRootModule):
     """
     TODO: rewrite
     This class implements a BERT-style encoder using the components in ./components.py, with HookPoints on every interesting activation. It inherits from HookedRootModule.
@@ -40,7 +39,7 @@ class HookedEncoder(HookedRootModule):
         - The model only accepts tokens as inputs, and not strings, or lists of strings
     """
 
-    def __init__(self, cfg, tokenizer=None, move_to_device=True, **kwargs):
+    def __init__(self, cfg, move_to_device=True, **kwargs):
         super().__init__()
         if isinstance(cfg, Dict):
             cfg = HookedViTConfig(**cfg)
@@ -50,13 +49,14 @@ class HookedEncoder(HookedRootModule):
             )
         self.cfg = cfg
 
-        assert (
-            self.cfg.n_devices == 1
-        ), "Multiple devices not supported for HookedViT"
+        assert self.cfg.n_devices == 1, "Multiple devices not supported for HookedViT"
 
         self.embed = ViTEmbed(self.cfg)
         self.blocks = nn.ModuleList(
-            [TransformerBlock(self.cfg) for _ in range(self.cfg.n_layers)]
+            [
+                TransformerBlock(self.cfg, block_index)
+                for block_index in range(self.cfg.n_layers)
+            ]  # @Alexa, should this be a BertBlock? It was a TransformerBlock before
         )
         self.classifier_head = ViTHead(cfg)
 
@@ -90,9 +90,9 @@ class HookedEncoder(HookedRootModule):
     def forward(
         self,
         input: Int[torch.Tensor, "batch num_channels height width"],
-        return_type: Optional[str] = "logits"
+        return_type: Optional[str] = "logits",
     ) -> Optional[Float[torch.Tensor, "batch pos num_labels"]]:
-        """Input must be a batch of images. 
+        """Input must be a batch of images.
 
         return_type Optional[str]: The type of output to return. Can be one of: None (return nothing, don't calculate logits), or 'logits' (return logits).
         """
@@ -103,6 +103,7 @@ class HookedEncoder(HookedRootModule):
             ims = ims.to(self.cfg.device)
 
         resid = self.hook_full_embed(self.embed(ims))
+        # @todo need the redundant layernorm for clipvit
 
         for block in self.blocks:
             resid = block(resid)
@@ -176,19 +177,15 @@ class HookedEncoder(HookedRootModule):
         checkpoint_value: Optional[int] = None,
         hf_model=None,
         device: Optional[str] = None,
-        tokenizer=None,
         move_to_device=True,
         dtype=torch.float32,
         **from_pretrained_kwargs,
-    ) -> HookedEncoder:
-        """Loads in the pretrained weights from huggingface. Currently supports loading weight from HuggingFace BertForMaskedLM. Unlike HookedTransformer, this does not yet do any preprocessing on the model."""
+    ) -> HookedViT:
+        """Loads in the pretrained weights from huggingface. Currently supports loading weight from HuggingFace ViTForImageClassification. Unlike HookedTransformer, this does not yet do any preprocessing on the model."""
         logging.warning(
-            "Support for BERT in TransformerLens is currently experimental, until such a time when it has feature "
-            "parity with HookedTransformer and has been tested on real research tasks. Until then, backward "
-            "compatibility is not guaranteed. Please see the docs for information on the limitations of the current "
-            "implementation."
+            "Support for ViT is subject to the same caveats as in the BERT implementation."
             "\n"
-            "If using BERT for interpretability research, keep in mind that BERT has some significant architectural "
+            "If using ViT for interpretability research, keep in mind that ViT has some significant architectural "
             "differences to GPT. For example, LayerNorms are applied *after* the attention and MLP components, meaning "
             "that the last LayerNorm in a block cannot be folded."
         )
@@ -218,7 +215,7 @@ class HookedEncoder(HookedRootModule):
             official_model_name, cfg, hf_model, dtype=dtype, **from_pretrained_kwargs
         )
 
-        model = cls(cfg, tokenizer, move_to_device=False)
+        model = cls(cfg, move_to_device=False)
 
         model.load_state_dict(state_dict, strict=False)
 
@@ -253,86 +250,62 @@ class HookedEncoder(HookedRootModule):
     @property
     def W_K(self) -> Float[torch.Tensor, "n_layers n_heads d_model d_head"]:
         """Stacks the key weights across all layers"""
-        return torch.stack(
-            [block.attn.W_K for block in self.blocks], dim=0
-        )
+        return torch.stack([block.attn.W_K for block in self.blocks], dim=0)
 
     @property
     def W_Q(self) -> Float[torch.Tensor, "n_layers n_heads d_model d_head"]:
         """Stacks the query weights across all layers"""
-        return torch.stack(
-            [block.attn.W_Q for block in self.blocks], dim=0
-        )
+        return torch.stack([block.attn.W_Q for block in self.blocks], dim=0)
 
     @property
     def W_V(self) -> Float[torch.Tensor, "n_layers n_heads d_model d_head"]:
         """Stacks the value weights across all layers"""
-        return torch.stack(
-            [block.attn.W_V for block in self.blocks], dim=0
-        )
+        return torch.stack([block.attn.W_V for block in self.blocks], dim=0)
 
     @property
     def W_O(self) -> Float[torch.Tensor, "n_layers n_heads d_head d_model"]:
         """Stacks the attn output weights across all layers"""
-        return torch.stack(
-            [block.attn.W_O for block in self.blocks], dim=0
-        )
+        return torch.stack([block.attn.W_O for block in self.blocks], dim=0)
 
     @property
     def W_in(self) -> Float[torch.Tensor, "n_layers d_model d_mlp"]:
         """Stacks the MLP input weights across all layers"""
-        return torch.stack(
-            [block.mlp.W_in for block in self.blocks], dim=0
-        )
+        return torch.stack([block.mlp.W_in for block in self.blocks], dim=0)
 
     @property
     def W_out(self) -> Float[torch.Tensor, "n_layers d_mlp d_model"]:
         """Stacks the MLP output weights across all layers"""
-        return torch.stack(
-            [block.mlp.W_out for block in self.blocks], dim=0
-        )
+        return torch.stack([block.mlp.W_out for block in self.blocks], dim=0)
 
     @property
     def b_K(self) -> Float[torch.Tensor, "n_layers n_heads d_head"]:
         """Stacks the key biases across all layers"""
-        return torch.stack(
-            [block.attn.b_K for block in self.blocks], dim=0
-        )
+        return torch.stack([block.attn.b_K for block in self.blocks], dim=0)
 
     @property
     def b_Q(self) -> Float[torch.Tensor, "n_layers n_heads d_head"]:
         """Stacks the query biases across all layers"""
-        return torch.stack(
-            [block.attn.b_Q for block in self.blocks], dim=0
-        )
+        return torch.stack([block.attn.b_Q for block in self.blocks], dim=0)
 
     @property
     def b_V(self) -> Float[torch.Tensor, "n_layers n_heads d_head"]:
         """Stacks the value biases across all layers"""
-        return torch.stack(
-            [block.attn.b_V for block in self.blocks], dim=0
-        )
+        return torch.stack([block.attn.b_V for block in self.blocks], dim=0)
 
     @property
     def b_O(self) -> Float[torch.Tensor, "n_layers d_model"]:
         """Stacks the attn output biases across all layers"""
-        return torch.stack(
-            [block.attn.b_O for block in self.blocks], dim=0
-        )
+        return torch.stack([block.attn.b_O for block in self.blocks], dim=0)
 
     @property
     def b_in(self) -> Float[torch.Tensor, "n_layers d_mlp"]:
         """Stacks the MLP input biases across all layers"""
-        return torch.stack(
-            [block.mlp.b_in for block in self.blocks], dim=0
-        )
+        return torch.stack([block.mlp.b_in for block in self.blocks], dim=0)
 
     @property
     def b_out(self) -> Float[torch.Tensor, "n_layers d_model"]:
         """Stacks the MLP output biases across all layers"""
-        return torch.stack(
-            [block.mlp.b_out for block in self.blocks], dim=0
-        )
+        return torch.stack([block.mlp.b_out for block in self.blocks], dim=0)
 
     @property
     def QK(self) -> FactoredMatrix:  # [n_layers, n_heads, d_model, d_model]

@@ -10,10 +10,16 @@ from typing import Dict, Optional
 import einops
 import torch
 from huggingface_hub import HfApi
-from transformers import AutoConfig, AutoModelForCausalLM, BertForPreTraining
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    BertForPreTraining,
+    ViTForImageClassification,
+)
 
 import transformer_lens.utils as utils
 from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
+from transformer_lens.HookedViTConfig import HookedViTConfig
 
 OFFICIAL_MODEL_NAMES = [
     "gpt2",
@@ -138,8 +144,8 @@ OFFICIAL_MODEL_NAMES = [
     "stabilityai/stablelm-tuned-alpha-7b",
     "bigscience/bloom-560m",
     "bigcode/santacoder",
-    ### Edits @MLEPORI 
-    "google/vit-base-patch16-224"
+    ### Edits @MLEPORI
+    "google/vit-base-patch16-224",
 ]
 """Official model names for models on HuggingFace."""
 
@@ -762,12 +768,28 @@ def convert_hf_model_config(model_name: str, **kwargs):
             "scale_attn_by_inverse_layer_idx": hf_config.scale_attn_by_inverse_layer_idx,
             "normalization_type": "LN",
         }
+    # EDITS @mlepori
+    elif architecture == "ViTForImageClassification":
+        cfg_dict = {
+            "d_model": hf_config.hidden_size,
+            "d_head": hf_config.hidden_size // hf_config.num_attention_heads,
+            "n_heads": hf_config.num_attention_heads,
+            "d_mlp": hf_config.intermediate_size,
+            "n_layers": hf_config.num_hidden_layers,
+            "image_size": hf_config.image_size,
+            "patch_size": hf_config.patch_size,
+            "num_channels": hf_config.num_channels,
+            "eps": hf_config.layer_norm_eps,
+            "act_fn": hf_config.hidden_act,
+            "n_ctx": int((hf_config.image_size**2) / (hf_config.patch_size**2)),
+        }
     else:
         raise NotImplementedError(f"{architecture} is not currently supported.")
     # All of these models use LayerNorm
     cfg_dict["original_architecture"] = architecture
-    # The name such that AutoTokenizer.from_pretrained works
-    cfg_dict["tokenizer_name"] = official_model_name
+    if "ViT" not in architecture:
+        # The name such that AutoTokenizer.from_pretrained works
+        cfg_dict["tokenizer_name"] = official_model_name
     return cfg_dict
 
 
@@ -914,9 +936,13 @@ def get_pretrained_model_config(
 
     cfg_dict["device"] = device
     cfg_dict["n_devices"] = n_devices
-    cfg_dict["default_prepend_bos"] = default_prepend_bos
 
-    cfg = HookedTransformerConfig.from_dict(cfg_dict)
+    # EDITS @mlepori
+    if "vit" in model_name:
+        cfg = HookedViTConfig.from_dict(cfg_dict)
+    else:
+        cfg_dict["default_prepend_bos"] = default_prepend_bos
+        cfg = HookedTransformerConfig.from_dict(cfg_dict)
     return cfg
 
 
@@ -1067,6 +1093,11 @@ def get_pretrained_state_dict(
                 hf_model = BertForPreTraining.from_pretrained(
                     official_model_name, torch_dtype=dtype, **kwargs
                 )
+            # EDITS @mlepori
+            elif "vit" in official_model_name:
+                hf_model = ViTForImageClassification.from_pretrained(
+                    official_model_name, torch_dtype=dtype, **kwargs
+                )
             else:
                 hf_model = AutoModelForCausalLM.from_pretrained(
                     official_model_name, torch_dtype=dtype, **kwargs
@@ -1091,6 +1122,9 @@ def get_pretrained_state_dict(
             state_dict = convert_llama_weights(hf_model, cfg)
         elif cfg.original_architecture == "BertForMaskedLM":
             state_dict = convert_bert_weights(hf_model, cfg)
+        # EDITS @mlepori
+        elif cfg.original_architecture == "ViTForImageClassification":
+            state_dict = convert_vit_weights(hf_model, cfg)
         elif cfg.original_architecture == "BloomForCausalLM":
             state_dict = convert_bloom_weights(hf_model, cfg)
         elif cfg.original_architecture == "GPT2LMHeadCustomModel":
@@ -1674,15 +1708,16 @@ def convert_bert_weights(bert, cfg: HookedTransformerConfig):
 
     return state_dict
 
+
 ### EDITS @mlepori
-def convert_vit_weights(vit, cfg: HookedTransformerConfig):
+def convert_vit_weights(vit, cfg: HookedViTConfig):
     # Takes in a ViTForImageClassification Model
     embeddings = vit.vit.embeddings
     state_dict = {
         "embed.embed.projection.weight": embeddings.patch_embeddings.projection.weight,
         "embed.embed.projection.bias": embeddings.patch_embeddings.projection.bias,
-        "embed.embed.cls_token": embeddings.cls_token.weight,
-        "embed.pos_embed.W_pos": embeddings.position_embeddings.weight,
+        "embed.embed.cls_token": embeddings.cls_token,
+        "embed.pos_embed": embeddings.position_embeddings,
     }
 
     for l in range(cfg.n_layers):
@@ -1713,10 +1748,8 @@ def convert_vit_weights(vit, cfg: HookedTransformerConfig):
 
         state_dict[f"blocks.{l}.attn.b_O"] = block.attention.output.dense.bias
 
-        ### @todo Stopped here
-        
-        state_dict[f"blocks.{l}.ln1.w"] = block.attention.output.LayerNorm.weight
-        state_dict[f"blocks.{l}.ln1.b"] = block.attention.output.LayerNorm.bias
+        state_dict[f"blocks.{l}.ln1.w"] = block.layernorm_before.weight
+        state_dict[f"blocks.{l}.ln1.b"] = block.layernorm_before.bias
         state_dict[f"blocks.{l}.mlp.W_in"] = einops.rearrange(
             block.intermediate.dense.weight, "mlp model -> model mlp"
         )
@@ -1725,20 +1758,17 @@ def convert_vit_weights(vit, cfg: HookedTransformerConfig):
             block.output.dense.weight, "model mlp -> mlp model"
         )
         state_dict[f"blocks.{l}.mlp.b_out"] = block.output.dense.bias
-        state_dict[f"blocks.{l}.ln2.w"] = block.output.LayerNorm.weight
-        state_dict[f"blocks.{l}.ln2.b"] = block.output.LayerNorm.bias
+        state_dict[f"blocks.{l}.ln2.w"] = block.layernorm_after.weight
+        state_dict[f"blocks.{l}.ln2.b"] = block.layernorm_after.bias
 
-    mlm_head = bert.cls.predictions
-    state_dict["mlm_head.W"] = mlm_head.transform.dense.weight
-    state_dict["mlm_head.b"] = mlm_head.transform.dense.bias
-    state_dict["mlm_head.ln.w"] = mlm_head.transform.LayerNorm.weight
-    state_dict["mlm_head.ln.b"] = mlm_head.transform.LayerNorm.bias
-    # Note: BERT uses tied embeddings
-    state_dict["unembed.W_U"] = embeddings.word_embeddings.weight.T
-    # "unembed.W_U": mlm_head.decoder.weight.T,
-    state_dict["unembed.b_U"] = mlm_head.bias
+    clf_head = vit.classifier
+    state_dict["classifier_head.W"] = clf_head.weight
+    state_dict["classifier_head.b"] = clf_head.bias
+    state_dict["classifier_head.ln.w"] = vit.vit.layernorm.weight
+    state_dict["classifier_head.ln.b"] = vit.vit.layernorm.bias
 
     return state_dict
+
 
 def convert_bloom_weights(bloom, cfg: HookedTransformerConfig):
     state_dict = {}

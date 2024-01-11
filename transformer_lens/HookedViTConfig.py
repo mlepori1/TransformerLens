@@ -98,7 +98,7 @@ class HookedViTConfig:
             keys and the queries (ie key = W_K(res_stream + pos_embed), but
             values and MLPs don't get any positional info)). Sinusoidal are not
             currently supported. Defaults to 'standard'.
-        num_labels (int, *optional*): Number of labels to use in the last layer added to the model, 
+        num_labels (int, *optional*): Number of labels to use in the last layer added to the model,
             typically for a classification task. Defaults to 1 (binary classification).
         id2label (Dict[int, str], *optional*): a map from index (for instance prediction index, or target index) to label.
         label2id: (Dict[str, int], *optional*): A map from label to index for the model.
@@ -116,7 +116,7 @@ class HookedViTConfig:
             to False.
         image_size (int, *optional*): The size (resolution) of each image. Defaults to 224.
         patch_size (int, *optional*): The size (resolution) of each patch. Defaults to 16.
-        num_channels (int, *optional*): The number of input channels. Defaults to 3. 
+        num_channels (int, *optional*): The number of input channels. Defaults to 3.
     """
 
     n_layers: int
@@ -141,28 +141,33 @@ class HookedViTConfig:
     normalization_type: Optional[str] = "LN"
     device: Optional[str] = None
     n_devices: int = 1
-    attention_dir: str = "bidirectional"
     attn_only: bool = False
     seed: Optional[int] = None
     initializer_range: float = -1.0
     init_weights: bool = True
+    scale_attn_by_inverse_layer_idx: bool = False
     positional_embedding_type: str = "standard"
     num_labels: int = 1
     id2label: Dict[int, str] = None
     label2id: Dict[str, int] = None
     n_params: Optional[int] = None
     use_hook_tokens: bool = False
+    parallel_attn_mlp: bool = False
     dtype: torch.dtype = torch.float32
-    post_embedding_ln: bool = False
+    attention_dir: str = "bidirectional"
+    use_local_attn: bool = False
+    gated_mlp: bool = False
+    default_prepend_bos: bool = False
     image_size: int = 224
     patch_size: int = 16
     num_channels: int = 3
+    n_ctx: int = 196
 
     def __post_init__(self):
         assert (
             self.image_size % self.patch_size == 0
         ), f"patch_size {self.patch_size} is invalid for image_size {self.image_size}"
-        
+
         if self.n_heads == -1:
             self.n_heads = self.d_model // self.d_head
 
@@ -173,7 +178,7 @@ class HookedViTConfig:
 
         if self.seed is not None:
             self.set_seed_everywhere(self.seed)
-            
+
         if not self.attn_only:
             if self.d_mlp is None:
                 # For some reason everyone hard codes in this hyper-parameter!
@@ -184,7 +189,7 @@ class HookedViTConfig:
             assert (
                 self.act_fn in SUPPORTED_ACTIVATIONS
             ), f"act_fn={self.act_fn} must be one of {SUPPORTED_ACTIVATIONS}"
-            
+
         if self.initializer_range < 0:
             # Roughly copy the GPT-2 value, but proportional to sqrt(1/d_model)
             self.initializer_range = 0.8 / np.sqrt(self.d_model)
@@ -193,7 +198,7 @@ class HookedViTConfig:
         self.n_params = self.n_layers * (
             (self.d_model * self.d_head * self.n_heads * 4)
         )
-        
+
         if not self.attn_only:
             # Number of parameters in MLP layers (ignoring biases and layer norm). 2 because W_in and W_out
             self.n_params += self.n_layers * self.d_model * self.d_mlp * 2
