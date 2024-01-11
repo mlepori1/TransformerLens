@@ -26,6 +26,7 @@ from transformer_lens.utilities import devices
 
 
 class HookedViT(HookedRootModule):
+class HookedViT(HookedRootModule):
     """
     TODO: rewrite
     This class implements a BERT-style encoder using the components in ./components.py, with HookPoints on every interesting activation. It inherits from HookedRootModule.
