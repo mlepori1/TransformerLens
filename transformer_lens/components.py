@@ -196,12 +196,12 @@ class BertEmbed(nn.Module):
         )
         layer_norm_out = self.ln(embeddings_out)
         return layer_norm_out
-    
-   
+
+
 class PatchEmbed(nn.Module):
     """
-    Turns an input of size `(batch_size, num_channels, height, width)` -> patch embeddings of shape `(batch_size, seq_length, d_model)`. 
-    Used by the ViTEmbed class. 
+    Turns an input of size `(batch_size, num_channels, height, width)` -> patch embeddings of shape `(batch_size, seq_length, d_model)`.
+    Used by the ViTEmbed class.
     """
 
     def __init__(self, cfg: Union[Dict, HookedViTConfig]):
@@ -209,39 +209,47 @@ class PatchEmbed(nn.Module):
         if isinstance(cfg, Dict):
             cfg = HookedViTConfig.from_dict(cfg)
         self.cfg = cfg
-        
+
         image_size, patch_size = cfg.image_size, cfg.patch_size
         num_channels, d_model = cfg.num_channels, cfg.d_model
-        
-        image_size = image_size if isinstance(image_size, Tuple) else (image_size, image_size)
-        patch_size = patch_size if isinstance(patch_size, Tuple) else (patch_size, patch_size)
-        num_patches = (image_size[1] // patch_size[1]) * (image_size[0] // patch_size[0])
+
+        image_size = (
+            image_size if isinstance(image_size, Tuple) else (image_size, image_size)
+        )
+        patch_size = (
+            patch_size if isinstance(patch_size, Tuple) else (patch_size, patch_size)
+        )
+        num_patches = (image_size[1] // patch_size[1]) * (
+            image_size[0] // patch_size[0]
+        )
         self.image_size = image_size
         self.patch_size = patch_size
         self.num_channels = num_channels
         self.num_patches = num_patches
-        
-        self.projection = nn.Conv2d(num_channels, d_model, kernel_size=patch_size, stride=patch_size)
+
+        self.projection = nn.Conv2d(
+            num_channels, d_model, kernel_size=patch_size, stride=patch_size
+        )
 
     def forward(
         self,
         pixel_values: Int[torch.Tensor, "batch num_channels height width"],
     ):
         batch_size, num_channels, height, width = pixel_values.shape
-        assert ( 
+        assert (
             num_channels == self.num_channels
-            ), f"Make sure that the channel dimension of the pixel values match with the one set in the configuration. Expected {self.num_channels} but got {num_channels}."
+        ), f"Make sure that the channel dimension of the pixel values match with the one set in the configuration. Expected {self.num_channels} but got {num_channels}."
         assert (
             height == self.image_size[0] and width == self.image_size[1]
-            ), f"Input image size ({height}*{width}) doesn't match model. Expected ({self.image_size[0]}*{self.image_size[1]})."
-        
+        ), f"Input image size ({height}*{width}) doesn't match model. Expected ({self.image_size[0]}*{self.image_size[1]})."
+
         embeddings = self.projection(pixel_values).flatten(2).transpose(1, 2)
         return embeddings
-   
-   
+
+
 class ViTEmbed(nn.Module):
     """
-    Custom embedding layer for a ViT model. 
+    Custom embedding layer for a ViT model.
     """
 
     def __init__(self, cfg: Union[Dict, HookedViTConfig]):
@@ -249,28 +257,29 @@ class ViTEmbed(nn.Module):
         if isinstance(cfg, Dict):
             cfg = HookedViTConfig.from_dict(cfg)
         self.cfg = cfg
-        
+
         self.embed = PatchEmbed(cfg)  # Patchify and embed
         self.cls_token = nn.Parameter(torch.randn(1, 1, cfg.d_model))
         num_patches = self.embed.num_patches
-        self.pos_embed = nn.Parameter(torch.randn(1, num_patches + 1, cfg.d_model))  # Plus the CLS token in dim 1
+        self.pos_embed = nn.Parameter(
+            torch.randn(1, num_patches + 1, cfg.d_model)
+        )  # Plus the CLS token in dim 1
 
         self.hook_embed = HookPoint()
         self.hook_pos_embed = HookPoint()
 
     def forward(
-        self,
-        pixel_values: Int[torch.Tensor, "batch num_channels height width"]
+        self, pixel_values: Int[torch.Tensor, "batch num_channels height width"]
     ):
         batch_size, num_channels, height, width = pixel_values.shape
         patch_embeddings_out = self.hook_embed(self.embed(pixel_values))
-        
+
         # Add CLS token
         cls_tokens = self.cls_token.expand(batch_size, -1, -1)
         embeddings = torch.cat((cls_tokens, patch_embeddings_out), dim=1)
-        
+
         position_embeddings_out = embeddings + self.hook_pos_embed(self.pos_embed)
-    
+
         return position_embeddings_out
 
 
@@ -301,11 +310,11 @@ class BertMLMHead(nn.Module):
         resid = self.act_fn(resid)
         resid = self.ln(resid)
         return resid
-    
-    
+
+
 class ViTHead(nn.Module):
     """
-    Transforms ViT embeddings into logits (for classification). 
+    Transforms ViT embeddings into logits (for classification).
     """
 
     def __init__(self, cfg: Union[Dict, HookedViTConfig]):
@@ -321,7 +330,7 @@ class ViTHead(nn.Module):
         resid = self.ln(resid)
         resid = (
             einsum(
-                "batch pos d_model, num_labels d_model_in -> batch pos num_labels",
+                "batch d_model, num_labels d_model_in -> batch num_labels",
                 resid,
                 self.W,
             )

@@ -26,7 +26,6 @@ from transformer_lens.utilities import devices
 
 
 class HookedViT(HookedRootModule):
-class HookedViT(HookedRootModule):
     """
     TODO: rewrite
     This class implements a BERT-style encoder using the components in ./components.py, with HookPoints on every interesting activation. It inherits from HookedRootModule.
@@ -71,7 +70,7 @@ class HookedViT(HookedRootModule):
     @overload
     def forward(
         self,
-        input: Int[torch.Tensor, "batch num_channels height width"],
+        pixel_values: Int[torch.Tensor, "batch num_channels height width"],
         return_type: Literal["logits"],
         token_type_ids: Optional[Int[torch.Tensor, "batch pos"]] = None,
         one_zero_attention_mask: Optional[Int[torch.Tensor, "batch pos"]] = None,
@@ -81,7 +80,7 @@ class HookedViT(HookedRootModule):
     @overload
     def forward(
         self,
-        input: Int[torch.Tensor, "batch num_channels height width"],
+        pixel_values: Int[torch.Tensor, "batch num_channels height width"],
         return_type: Literal[None],
         token_type_ids: Optional[Int[torch.Tensor, "batch pos"]] = None,
         one_zero_attention_mask: Optional[Int[torch.Tensor, "batch pos"]] = None,
@@ -90,7 +89,7 @@ class HookedViT(HookedRootModule):
 
     def forward(
         self,
-        input: Int[torch.Tensor, "batch num_channels height width"],
+        pixel_values: Int[torch.Tensor, "batch num_channels height width"],
         return_type: Optional[str] = "logits",
     ) -> Optional[Float[torch.Tensor, "batch pos num_labels"]]:
         """Input must be a batch of images.
@@ -98,7 +97,7 @@ class HookedViT(HookedRootModule):
         return_type Optional[str]: The type of output to return. Can be one of: None (return nothing, don't calculate logits), or 'logits' (return logits).
         """
 
-        ims = input
+        ims = pixel_values
 
         if ims.device.type != self.cfg.device:
             ims = ims.to(self.cfg.device)
@@ -108,7 +107,10 @@ class HookedViT(HookedRootModule):
 
         for block in self.blocks:
             resid = block(resid)
-        logits = self.classifier_head(resid)
+
+        # Get CLS Token
+        cls_tok = resid[:, 0, :]
+        logits = self.classifier_head(cls_tok)
 
         if return_type is None:
             return

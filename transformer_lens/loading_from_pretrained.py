@@ -782,6 +782,7 @@ def convert_hf_model_config(model_name: str, **kwargs):
             "eps": hf_config.layer_norm_eps,
             "act_fn": hf_config.hidden_act,
             "n_ctx": int((hf_config.image_size**2) / (hf_config.patch_size**2)),
+            "num_labels": hf_config.num_labels,
         }
     else:
         raise NotImplementedError(f"{architecture} is not currently supported.")
