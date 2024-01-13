@@ -1717,7 +1717,7 @@ def convert_vit_weights(vit, cfg: HookedViTConfig):
     state_dict = {
         "embed.embed.projection.weight": embeddings.patch_embeddings.projection.weight,
         "embed.embed.projection.bias": embeddings.patch_embeddings.projection.bias,
-        "embed.embed.cls_token": embeddings.cls_token,
+        "embed.cls_token": embeddings.cls_token,
         "embed.pos_embed": embeddings.position_embeddings,
     }
 
