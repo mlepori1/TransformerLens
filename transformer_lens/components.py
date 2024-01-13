@@ -330,7 +330,7 @@ class ViTHead(nn.Module):
         resid = self.ln(resid)
         resid = (
             einsum(
-                "batch d_model, num_labels d_model_in -> batch num_labels",
+                "batch d_model, num_labels d_model -> batch num_labels",
                 resid,
                 self.W,
             )
