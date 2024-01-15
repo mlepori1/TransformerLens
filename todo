@@ -1,5 +1,0 @@
-[] Instantiate a Hooked ViT and see if errors are thrown
-[] Try to access vector cache
-[] Add CLIP support
-[] See if HF and TL models give same output and intermediate computation
-[X] Read about LN folding

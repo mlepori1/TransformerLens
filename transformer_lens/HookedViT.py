@@ -20,7 +20,7 @@ from typing_extensions import Literal
 
 import transformer_lens.loading_from_pretrained as loading
 from transformer_lens import ActivationCache, FactoredMatrix, HookedViTConfig
-from transformer_lens.components import TransformerBlock, BertBlock, ViTEmbed, ViTHead
+from transformer_lens.components import TransformerBlock, LayerNorm, ViTEmbed, ViTHead
 from transformer_lens.hook_points import HookedRootModule, HookPoint
 from transformer_lens.utilities import devices
 
@@ -52,11 +52,14 @@ class HookedViT(HookedRootModule):
         assert self.cfg.n_devices == 1, "Multiple devices not supported for HookedViT"
 
         self.embed = ViTEmbed(self.cfg)
+        if self.cfg.is_clip:
+            self.pre_layernorm = LayerNorm(self.cfg)
+
         self.blocks = nn.ModuleList(
             [
                 TransformerBlock(self.cfg, block_index)
                 for block_index in range(self.cfg.n_layers)
-            ]  # @Alexa, should this be a BertBlock? It was a TransformerBlock before
+            ]
         )
         self.classifier_head = ViTHead(cfg)
 
@@ -102,8 +105,11 @@ class HookedViT(HookedRootModule):
         if ims.device.type != self.cfg.device:
             ims = ims.to(self.cfg.device)
 
-        resid = self.hook_full_embed(self.embed(ims))
-        # @todo need the redundant layernorm for clipvit
+        # There's a redundant layernorm in CLIP
+        if self.cfg.is_clip:
+            resid = self.hook_full_embed(self.pre_layernorm(self.embed(ims)))
+        else:
+            resid = self.hook_full_embed(self.embed(ims))
 
         for block in self.blocks:
             resid = block(resid)
@@ -176,6 +182,7 @@ class HookedViT(HookedRootModule):
     def from_pretrained(
         cls,
         model_name: str,
+        is_clip: bool = False,
         checkpoint_index: Optional[int] = None,
         checkpoint_value: Optional[int] = None,
         hf_model=None,
@@ -211,6 +218,7 @@ class HookedViT(HookedRootModule):
             device=device,
             n_devices=1,
             dtype=dtype,
+            is_clip=is_clip,
             **from_pretrained_kwargs,
         )
 
@@ -219,7 +227,6 @@ class HookedViT(HookedRootModule):
         )
 
         model = cls(cfg, move_to_device=False)
-
         model.load_state_dict(state_dict, strict=False)
 
         if move_to_device:

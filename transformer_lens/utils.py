@@ -185,6 +185,13 @@ def gelu_fast(
     )
 
 
+## Edits @mlepori
+# Used in CLIP ViT
+def quick_gelu(
+    input: Float[torch.Tensor, "batch pos d_mlp"]
+) -> Float[torch.Tensor, "batch pos d_mlp"]:
+    return input * torch.sigmoid(1.702 * input)
+
 def solu(
     input: Float[torch.Tensor, "batch pos d_mlp"]
 ) -> Float[torch.Tensor, "batch pos d_mlp"]:

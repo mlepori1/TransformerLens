@@ -50,6 +50,8 @@ def get_property(name, model_name):
             return "gelu"
         if cfg.act_fn == "gelu_fast":
             return "gelu"
+        if cfg.act_fn == "quick_gelu":
+            return "quick_gelu"
         if cfg.act_fn == "solu_ln":
             return "solu"
         return cfg.act_fn

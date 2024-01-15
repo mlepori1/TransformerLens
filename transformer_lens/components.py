@@ -20,7 +20,13 @@ from transformer_lens.hook_points import HookPoint
 from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
 from transformer_lens.HookedViTConfig import HookedViTConfig
 from transformer_lens.past_key_value_caching import HookedTransformerKeyValueCacheEntry
-from transformer_lens.utils import gelu_fast, gelu_new, get_offset_position_ids, solu
+from transformer_lens.utils import (
+    gelu_fast,
+    gelu_new,
+    quick_gelu,
+    get_offset_position_ids,
+    solu,
+)
 
 
 # Embed & Unembed
@@ -227,8 +233,12 @@ class PatchEmbed(nn.Module):
         self.num_channels = num_channels
         self.num_patches = num_patches
 
+        if cfg.is_clip:
+            bias = False
+        else:
+            bias = True
         self.projection = nn.Conv2d(
-            num_channels, d_model, kernel_size=patch_size, stride=patch_size
+            num_channels, d_model, kernel_size=patch_size, stride=patch_size, bias=bias
         )
 
     def forward(
@@ -324,18 +334,28 @@ class ViTHead(nn.Module):
         self.cfg = cfg
         self.ln = LayerNorm(cfg)
         self.W = nn.Parameter(torch.empty(cfg.num_labels, cfg.d_model, dtype=cfg.dtype))
-        self.b = nn.Parameter(torch.zeros(cfg.num_labels, dtype=cfg.dtype))
+        # CLIP ViT has no bias
+        if self.cfg.is_clip == False:
+            self.b = nn.Parameter(torch.zeros(cfg.num_labels, dtype=cfg.dtype))
 
     def forward(self, resid: Float[torch.Tensor, "batch pos d_model"]) -> torch.Tensor:
         resid = self.ln(resid)
-        resid = (
-            einsum(
+        # No bias for CLIP ViT
+        if self.cfg.is_clip:
+            resid = einsum(
                 "batch d_model, num_labels d_model -> batch num_labels",
                 resid,
                 self.W,
             )
-            + self.b
-        )
+        else:
+            resid = (
+                einsum(
+                    "batch d_model, num_labels d_model -> batch num_labels",
+                    resid,
+                    self.W,
+                )
+                + self.b
+            )
         return resid
 
 
@@ -1054,6 +1074,9 @@ class MLP(nn.Module):
             self.act_fn = gelu_new
         elif self.cfg.act_fn == "gelu_fast":
             self.act_fn = gelu_fast
+        # edit @mlepori
+        elif self.cfg.act_fn == "quick_gelu":
+            self.act_fn = quick_gelu
         elif self.cfg.act_fn == "solu_ln":
             self.act_fn = solu
             # Hook taken between activation and layer norm
@@ -1136,6 +1159,9 @@ class GatedMLP(nn.Module):
             self.act_fn = gelu_new
         elif self.cfg.act_fn == "gelu_fast":
             self.act_fn = gelu_fast
+        # edit @mlepori
+        elif self.cfg.act_fn == "quick_gelu":
+            self.act_fn = quick_gelu
         elif self.cfg.act_fn == "solu_ln":
             self.act_fn = solu
             # Hook taken between activation and layer norm

@@ -15,6 +15,7 @@ from transformers import (
     AutoModelForCausalLM,
     BertForPreTraining,
     ViTForImageClassification,
+    CLIPVisionModelWithProjection,
 )
 
 import transformer_lens.utils as utils
@@ -146,6 +147,7 @@ OFFICIAL_MODEL_NAMES = [
     "bigcode/santacoder",
     ### Edits @MLEPORI
     "google/vit-base-patch16-224",
+    "openai/clip-vit-base-patch32",
 ]
 """Official model names for models on HuggingFace."""
 
@@ -508,6 +510,7 @@ MODEL_ALIASES = {
     "bigcode/santacoder": ["santacoder"],
     # EDITS @MLEPORI
     "google/vit-base-patch16-224": ["vit"],
+    "openai/clip-vit-base-patch32": ["clip"],
 }
 """Model aliases for models on HuggingFace."""
 
@@ -784,11 +787,27 @@ def convert_hf_model_config(model_name: str, **kwargs):
             "n_ctx": int((hf_config.image_size**2) / (hf_config.patch_size**2)),
             "num_labels": hf_config.num_labels,
         }
+    elif architecture == "CLIPModel":
+        hf_config = hf_config.vision_config
+        cfg_dict = {
+            "d_model": hf_config.hidden_size,
+            "d_head": hf_config.hidden_size // hf_config.num_attention_heads,
+            "n_heads": hf_config.num_attention_heads,
+            "d_mlp": hf_config.intermediate_size,
+            "n_layers": hf_config.num_hidden_layers,
+            "image_size": hf_config.image_size,
+            "patch_size": hf_config.patch_size,
+            "num_channels": hf_config.num_channels,
+            "eps": hf_config.layer_norm_eps,
+            "act_fn": hf_config.hidden_act,
+            "n_ctx": int((hf_config.image_size**2) / (hf_config.patch_size**2)),
+            "num_labels": hf_config.projection_dim,
+        }
     else:
         raise NotImplementedError(f"{architecture} is not currently supported.")
     # All of these models use LayerNorm
     cfg_dict["original_architecture"] = architecture
-    if "ViT" not in architecture:
+    if "ViT" not in architecture and "CLIP" not in architecture:
         # The name such that AutoTokenizer.from_pretrained works
         cfg_dict["tokenizer_name"] = official_model_name
     return cfg_dict
@@ -939,7 +958,8 @@ def get_pretrained_model_config(
     cfg_dict["n_devices"] = n_devices
 
     # EDITS @mlepori
-    if "vit" in model_name:
+    if "vit" in model_name or "clip" in model_name:
+        cfg_dict["is_clip"] = kwargs["is_clip"]
         cfg = HookedViTConfig.from_dict(cfg_dict)
     else:
         cfg_dict["default_prepend_bos"] = default_prepend_bos
@@ -1095,10 +1115,15 @@ def get_pretrained_state_dict(
                     official_model_name, torch_dtype=dtype, **kwargs
                 )
             # EDITS @mlepori
-            elif "vit" in official_model_name:
-                hf_model = ViTForImageClassification.from_pretrained(
-                    official_model_name, torch_dtype=dtype, **kwargs
-                )
+            elif "vit" in official_model_name or "clip" in official_model_name:
+                if cfg.is_clip == False:
+                    hf_model = ViTForImageClassification.from_pretrained(
+                        official_model_name, torch_dtype=dtype, **kwargs
+                    )
+                else:
+                    hf_model = CLIPVisionModelWithProjection.from_pretrained(
+                        official_model_name, torch_dtype=dtype, **kwargs
+                    )
             else:
                 hf_model = AutoModelForCausalLM.from_pretrained(
                     official_model_name, torch_dtype=dtype, **kwargs
@@ -1126,6 +1151,8 @@ def get_pretrained_state_dict(
         # EDITS @mlepori
         elif cfg.original_architecture == "ViTForImageClassification":
             state_dict = convert_vit_weights(hf_model, cfg)
+        elif cfg.original_architecture == "CLIPModel":
+            state_dict = convert_clip_weights(hf_model, cfg)
         elif cfg.original_architecture == "BloomForCausalLM":
             state_dict = convert_bloom_weights(hf_model, cfg)
         elif cfg.original_architecture == "GPT2LMHeadCustomModel":
@@ -1767,6 +1794,67 @@ def convert_vit_weights(vit, cfg: HookedViTConfig):
     state_dict["classifier_head.b"] = clf_head.bias
     state_dict["classifier_head.ln.w"] = vit.vit.layernorm.weight
     state_dict["classifier_head.ln.b"] = vit.vit.layernorm.bias
+
+    return state_dict
+
+
+### EDITS @mlepori
+def convert_clip_weights(clip, cfg: HookedViTConfig):
+    # Takes in a CLIPVisionModelWithProjection Model
+    embeddings = clip.vision_model.embeddings
+    state_dict = {
+        "embed.embed.projection.weight": embeddings.patch_embedding.weight,
+        "embed.cls_token": embeddings.class_embedding.reshape(1, 1, -1),
+        "embed.pos_embed": embeddings.position_embedding.weight.unsqueeze(0),
+        "pre_layernorm.w": clip.vision_model.pre_layrnorm.weight,
+        "pre_layernorm.b": clip.vision_model.pre_layrnorm.bias,
+    }
+
+    for l in range(cfg.n_layers):
+        block = clip.vision_model.encoder.layers[l]
+        state_dict[f"blocks.{l}.attn.W_Q"] = einops.rearrange(
+            block.self_attn.q_proj.weight, "(i h) m -> i m h", i=cfg.n_heads
+        )
+        state_dict[f"blocks.{l}.attn.b_Q"] = einops.rearrange(
+            block.self_attn.q_proj.bias, "(i h) -> i h", i=cfg.n_heads
+        )
+        state_dict[f"blocks.{l}.attn.W_K"] = einops.rearrange(
+            block.self_attn.k_proj.weight, "(i h) m -> i m h", i=cfg.n_heads
+        )
+        state_dict[f"blocks.{l}.attn.b_K"] = einops.rearrange(
+            block.self_attn.k_proj.bias, "(i h) -> i h", i=cfg.n_heads
+        )
+        state_dict[f"blocks.{l}.attn.W_V"] = einops.rearrange(
+            block.self_attn.v_proj.weight, "(i h) m -> i m h", i=cfg.n_heads
+        )
+        state_dict[f"blocks.{l}.attn.b_V"] = einops.rearrange(
+            block.self_attn.v_proj.bias, "(i h) -> i h", i=cfg.n_heads
+        )
+        state_dict[f"blocks.{l}.attn.W_O"] = einops.rearrange(
+            block.self_attn.out_proj.weight,
+            "m (i h) -> i h m",
+            i=cfg.n_heads,
+        )
+
+        state_dict[f"blocks.{l}.attn.b_O"] = block.self_attn.out_proj.bias
+
+        state_dict[f"blocks.{l}.ln1.w"] = block.layer_norm1.weight
+        state_dict[f"blocks.{l}.ln1.b"] = block.layer_norm1.bias
+        state_dict[f"blocks.{l}.mlp.W_in"] = einops.rearrange(
+            block.mlp.fc1.weight, "mlp model -> model mlp"
+        )
+        state_dict[f"blocks.{l}.mlp.b_in"] = block.mlp.fc1.bias
+        state_dict[f"blocks.{l}.mlp.W_out"] = einops.rearrange(
+            block.mlp.fc2.weight, "model mlp -> mlp model"
+        )
+        state_dict[f"blocks.{l}.mlp.b_out"] = block.mlp.fc2.bias
+        state_dict[f"blocks.{l}.ln2.w"] = block.layer_norm2.weight
+        state_dict[f"blocks.{l}.ln2.b"] = block.layer_norm2.bias
+
+    clf_head = clip.visual_projection
+    state_dict["classifier_head.W"] = clf_head.weight
+    state_dict["classifier_head.ln.w"] = clip.vision_model.post_layernorm.weight
+    state_dict["classifier_head.ln.b"] = clip.vision_model.post_layernorm.bias
 
     return state_dict
 
