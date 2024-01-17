@@ -146,7 +146,7 @@ OFFICIAL_MODEL_NAMES = [
     "bigscience/bloom-560m",
     "bigcode/santacoder",
     ### Edits @MLEPORI
-    "google/vit-base-patch16-224",
+    "google/vit-base-patch32-224-in21k",
     "openai/clip-vit-base-patch32",
 ]
 """Official model names for models on HuggingFace."""
@@ -509,7 +509,7 @@ MODEL_ALIASES = {
     "bigscience/bloom-560m": ["bloom-560m"],
     "bigcode/santacoder": ["santacoder"],
     # EDITS @MLEPORI
-    "google/vit-base-patch16-224": ["vit"],
+    "google/vit-base-patch32-224-in21k": ["vit"],
     "openai/clip-vit-base-patch32": ["clip"],
 }
 """Model aliases for models on HuggingFace."""
@@ -772,7 +772,7 @@ def convert_hf_model_config(model_name: str, **kwargs):
             "normalization_type": "LN",
         }
     # EDITS @mlepori
-    elif architecture == "ViTForImageClassification":
+    elif architecture == "ViTForImageClassification" or architecture == "ViTModel":
         cfg_dict = {
             "d_model": hf_config.hidden_size,
             "d_head": hf_config.hidden_size // hf_config.num_attention_heads,
@@ -1149,7 +1149,7 @@ def get_pretrained_state_dict(
         elif cfg.original_architecture == "BertForMaskedLM":
             state_dict = convert_bert_weights(hf_model, cfg)
         # EDITS @mlepori
-        elif cfg.original_architecture == "ViTForImageClassification":
+        elif cfg.original_architecture == "ViTForImageClassification" or cfg.original_architecture == "ViTModel":
             state_dict = convert_vit_weights(hf_model, cfg)
         elif cfg.original_architecture == "CLIPModel":
             state_dict = convert_clip_weights(hf_model, cfg)
