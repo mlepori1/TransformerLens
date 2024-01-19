@@ -147,6 +147,7 @@ OFFICIAL_MODEL_NAMES = [
     "bigcode/santacoder",
     ### Edits @MLEPORI
     "google/vit-base-patch32-224-in21k",
+    "google/vit-base-patch16-224-in21k",
     "openai/clip-vit-base-patch32",
     "openai/clip-vit-base-patch16",
 ]
@@ -511,6 +512,7 @@ MODEL_ALIASES = {
     "bigcode/santacoder": ["santacoder"],
     # EDITS @MLEPORI
     "google/vit-base-patch32-224-in21k": ["vit"],
+    "google/vit-base-patch16-224-in21k": ["vit"],
     "openai/clip-vit-base-patch32": ["clip"],
     "openai/clip-vit-base-patch16": ["clip"],
 }
