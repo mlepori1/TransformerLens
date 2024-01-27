@@ -335,7 +335,7 @@ class ViTHead(nn.Module):
         self.ln = LayerNorm(cfg)
         self.W = nn.Parameter(torch.empty(cfg.num_labels, cfg.d_model, dtype=cfg.dtype))
         # CLIP ViT has no bias
-        if self.cfg.is_clip == False:
+        if self.cfg.is_clip == False or self.cfg.force_projection_bias == True:
             self.b = nn.Parameter(torch.zeros(cfg.num_labels, dtype=cfg.dtype))
 
     def forward(self, resid: Float[torch.Tensor, "batch pos d_model"]) -> torch.Tensor:

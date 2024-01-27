@@ -1853,6 +1853,8 @@ def convert_clip_weights(clip, cfg: HookedViTConfig):
 
     clf_head = clip.visual_projection
     state_dict["classifier_head.W"] = clf_head.weight
+    if cfg.force_projection_bias == True:
+        state_dict["classifier_head.b"] = clf_head.bias
     state_dict["classifier_head.ln.w"] = clip.vision_model.post_layernorm.weight
     state_dict["classifier_head.ln.b"] = clip.vision_model.post_layernorm.bias
 

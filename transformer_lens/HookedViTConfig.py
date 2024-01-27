@@ -19,7 +19,15 @@ import torch
 
 from transformer_lens import utils
 
-SUPPORTED_ACTIVATIONS = ["relu", "gelu", "silu", "gelu_new", "solu_ln", "gelu_fast", "quick_gelu"]
+SUPPORTED_ACTIVATIONS = [
+    "relu",
+    "gelu",
+    "silu",
+    "gelu_new",
+    "solu_ln",
+    "gelu_fast",
+    "quick_gelu",
+]
 
 
 @dataclass
@@ -117,6 +125,9 @@ class HookedViTConfig:
         image_size (int, *optional*): The size (resolution) of each image. Defaults to 224.
         patch_size (int, *optional*): The size (resolution) of each patch. Defaults to 16.
         num_channels (int, *optional*): The number of input channels. Defaults to 3.
+        is_clip (bool, *optional*): Whether we're loading from a CLIP model
+        force_projection_bias (bool, *optional*): Whether to force the visual projection to have a bias term
+
     """
 
     n_layers: int
@@ -163,6 +174,7 @@ class HookedViTConfig:
     num_channels: int = 3
     n_ctx: int = 196
     is_clip: bool = False
+    force_projection_bias: bool = False
 
     def __post_init__(self):
         assert (

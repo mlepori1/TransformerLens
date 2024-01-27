@@ -183,6 +183,7 @@ class HookedViT(HookedRootModule):
         cls,
         model_name: str,
         is_clip: bool = False,
+        force_projection_bias: bool = False,  # Needed to force a projection bias
         checkpoint_index: Optional[int] = None,
         checkpoint_value: Optional[int] = None,
         hf_model=None,
@@ -219,6 +220,7 @@ class HookedViT(HookedRootModule):
             n_devices=1,
             dtype=dtype,
             is_clip=is_clip,
+            force_projection_bias=force_projection_bias,
             **from_pretrained_kwargs,
         )
 
