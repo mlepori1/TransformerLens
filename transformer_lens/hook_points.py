@@ -233,7 +233,7 @@ class HookedRootModule(nn.Module):
         )
 
     def check_hooks_to_add(
-        self, hook_point, hook_point_name, hook, dir="fwd", is_permanent=False
+        self, hook_point, hook_point_name, hook, dir="fwd", is_permanent=False, prepend=False
     ) -> None:
         """Override this function to add checks on which hooks should be added"""
         pass

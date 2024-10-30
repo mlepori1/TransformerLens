@@ -14,6 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from fancy_einsum import einsum
 from jaxtyping import Float, Int
+import math
 
 from transformer_lens.FactoredMatrix import FactoredMatrix
 from transformer_lens.hook_points import HookPoint
@@ -204,6 +205,16 @@ class BertEmbed(nn.Module):
         return layer_norm_out
 
 
+class Dinov2LayerScale(nn.Module):
+    def __init__(self, cfg) -> None:
+        super().__init__()
+        self.cfg = cfg
+        self.lambda1 = nn.Parameter(cfg.layerscale_value * torch.ones(cfg.d_model))
+
+    def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
+        return hidden_state * self.lambda1
+
+
 class PatchEmbed(nn.Module):
     """
     Turns an input of size `(batch_size, num_channels, height, width)` -> patch embeddings of shape `(batch_size, seq_length, d_model)`.
@@ -228,6 +239,7 @@ class PatchEmbed(nn.Module):
         num_patches = (image_size[1] // patch_size[1]) * (
             image_size[0] // patch_size[0]
         )
+            
         self.image_size = image_size
         self.patch_size = patch_size
         self.num_channels = num_channels
@@ -249,11 +261,14 @@ class PatchEmbed(nn.Module):
         assert (
             num_channels == self.num_channels
         ), f"Make sure that the channel dimension of the pixel values match with the one set in the configuration. Expected {self.num_channels} but got {num_channels}."
+        """
         assert (
             height == self.image_size[0] and width == self.image_size[1]
         ), f"Input image size ({height}*{width}) doesn't match model. Expected ({self.image_size[0]}*{self.image_size[1]})."
+        """
 
         embeddings = self.projection(pixel_values).flatten(2).transpose(1, 2)
+
         return embeddings
 
 
@@ -278,8 +293,44 @@ class ViTEmbed(nn.Module):
         self.hook_embed = HookPoint()
         self.hook_pos_embed = HookPoint()
 
+    def interpolate_pos_encoding(self, embeddings: torch.Tensor, height: int, width: int) -> torch.Tensor:
+        """
+        This method allows to interpolate the pre-trained position encodings, to be able to use the model on higher
+        resolution images.
+
+        Source:
+        https://github.com/facebookresearch/dino/blob/de9ee3df6cf39fac952ab558447af1fa1365362a/vision_transformer.py#L174
+        """
+
+        num_patches = embeddings.shape[1] - 1
+        num_positions = self.pos_embed.shape[1] - 1
+        if num_patches == num_positions and height == width:
+            return self.pos_embed
+        class_pos_embed = self.pos_embed[:, 0]
+        patch_pos_embed = self.pos_embed[:, 1:]
+        dim = embeddings.shape[-1]
+        height = height // self.cfg.patch_size
+        width = width // self.cfg.patch_size
+        # we add a small number to avoid floating point error in the interpolation
+        # see discussion at https://github.com/facebookresearch/dino/issues/8
+        height, width = height + 0.1, width + 0.1
+        patch_pos_embed = patch_pos_embed.reshape(1, int(math.sqrt(num_positions)), int(math.sqrt(num_positions)), dim)
+        patch_pos_embed = patch_pos_embed.permute(0, 3, 1, 2)
+        target_dtype = patch_pos_embed.dtype
+        patch_pos_embed = nn.functional.interpolate(
+            patch_pos_embed.to(dtype=torch.float32),
+            scale_factor=(float(height / math.sqrt(num_positions)), float(width / math.sqrt(num_positions))),
+            mode="bicubic",
+            align_corners=False,
+        ).to(dtype=target_dtype)
+        if int(height) != patch_pos_embed.shape[-2] or int(width) != patch_pos_embed.shape[-1]:
+            raise ValueError("Width or height does not match with the interpolated position embeddings")
+        patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
+        return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1)
+
     def forward(
-        self, pixel_values: Int[torch.Tensor, "batch num_channels height width"]
+        self, 
+        pixel_values: Int[torch.Tensor, "batch num_channels height width"],
     ):
         batch_size, num_channels, height, width = pixel_values.shape
         patch_embeddings_out = self.hook_embed(self.embed(pixel_values))
@@ -288,7 +339,10 @@ class ViTEmbed(nn.Module):
         cls_tokens = self.cls_token.expand(batch_size, -1, -1)
         embeddings = torch.cat((cls_tokens, patch_embeddings_out), dim=1)
 
-        position_embeddings_out = embeddings + self.hook_pos_embed(self.pos_embed)
+        if "dino" in self.cfg.model_name:
+            position_embeddings_out = embeddings + self.interpolate_pos_encoding(embeddings, height, width)
+        else:
+            position_embeddings_out = embeddings + self.hook_pos_embed(self.pos_embed)
 
         return position_embeddings_out
 
@@ -332,25 +386,27 @@ class ViTHead(nn.Module):
         if isinstance(cfg, Dict):
             cfg = HookedViTConfig.from_dict(cfg)
         self.cfg = cfg
-        self.ln = LayerNorm(cfg)
-        self.W = nn.Parameter(torch.empty(cfg.num_labels, cfg.d_model, dtype=cfg.dtype))
+        self.ln = LayerNorm(cfg, length=cfg.d_classifier_input)
+        self.W = nn.Parameter(torch.empty(cfg.num_labels, cfg.d_classifier_input, dtype=cfg.dtype))
         # CLIP ViT has no bias
         if self.cfg.is_clip == False or self.cfg.force_projection_bias == True:
             self.b = nn.Parameter(torch.zeros(cfg.num_labels, dtype=cfg.dtype))
 
     def forward(self, resid: Float[torch.Tensor, "batch pos d_model"]) -> torch.Tensor:
-        resid = self.ln(resid)
+        if "dino" not in self.cfg.model_name:
+            resid = self.ln(resid)
+
         # No bias for CLIP ViT
         if self.cfg.is_clip:
             resid = einsum(
-                "batch d_model, num_labels d_model -> batch num_labels",
+                "batch classifier_input, num_labels classifier_input -> batch num_labels",
                 resid,
                 self.W,
             )
         else:
             resid = (
                 einsum(
-                    "batch d_model, num_labels d_model -> batch num_labels",
+                    "batch classifier_input, num_labels classifier_input -> batch num_labels",
                     resid,
                     self.W,
                 )
@@ -602,6 +658,8 @@ class Attention(nn.Module):
         self.hook_attn_scores = HookPoint()  # [batch, head_index, query_pos, key_pos]
         self.hook_pattern = HookPoint()  # [batch, head_index, query_pos, key_pos]
         self.hook_result = HookPoint()  # [batch, pos, head_index, d_model]
+        
+        self.attn_scores = torch.zeros((1, self.cfg.n_layers, 50, 50), requires_grad=True)
 
         # See HookedTransformerConfig for more details.
         if self.cfg.positional_embedding_type == "shortformer":
@@ -760,6 +818,7 @@ class Attention(nn.Module):
 
         attn_scores = self.hook_attn_scores(attn_scores)
         pattern = F.softmax(attn_scores, dim=-1)
+        self.attn_scores = pattern
         pattern = torch.where(torch.isnan(pattern), torch.zeros_like(pattern), pattern)
         pattern = self.hook_pattern(pattern)  # [batch, head_index, query_pos, key_pos]
         pattern = pattern.to(self.cfg.dtype)
@@ -1264,6 +1323,10 @@ class TransformerBlock(nn.Module):
             self.hook_resid_mid = HookPoint()  # [batch, pos, d_model]
         self.hook_resid_post = HookPoint()  # [batch, pos, d_model]
 
+        if "dino" in self.cfg.model_name:
+            self.layer_scale1 = Dinov2LayerScale(cfg)
+            self.layer_scale2 = Dinov2LayerScale(cfg)
+
     def forward(
         self,
         resid_pre: Float[torch.Tensor, "batch pos d_model"],
@@ -1335,6 +1398,10 @@ class TransformerBlock(nn.Module):
                 attention_mask=attention_mask,
             )
         )  # [batch, pos, d_model]
+
+        if "dino" in self.cfg.model_name:
+            attn_out = self.layer_scale1(attn_out)
+
         if not self.cfg.attn_only and not self.cfg.parallel_attn_mlp:
             resid_mid = self.hook_resid_mid(
                 resid_pre + attn_out
@@ -1348,6 +1415,10 @@ class TransformerBlock(nn.Module):
             mlp_out = self.hook_mlp_out(
                 self.mlp(normalized_resid_mid)
             )  # [batch, pos, d_model]
+
+            if "dino" in self.cfg.model_name:
+                mlp_out = self.layer_scale2(mlp_out)
+            
             resid_post = self.hook_resid_post(
                 resid_mid + mlp_out
             )  # [batch, pos, d_model]

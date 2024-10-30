@@ -1008,7 +1008,13 @@ class ActivationCache:
         residual_stack = residual_stack - residual_stack.mean(dim=-1, keepdim=True)
 
         if layer == self.model.cfg.n_layers or layer is None:
-            scale = self["ln_final.hook_scale"]
+            try:
+                scale = self["ln_final.hook_scale"]
+            except KeyError:
+                if "dino" in self.model.cfg.model_name:
+                    scale = self["post_layernorm.hook_scale"]
+                else:
+                    scale = self["classifier_head.ln.hook_scale"]
         else:
             hook_name = f"blocks.{layer}.ln{2 if mlp_input else 1}.hook_scale"
             scale = self[hook_name]

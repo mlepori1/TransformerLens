@@ -13,7 +13,7 @@ import logging
 from typing import Dict, List, Optional, Tuple, Union, cast, overload
 
 import torch
-from einops import repeat
+from einops import repeat, rearrange
 from jaxtyping import Float, Int
 from torch import nn
 from typing_extensions import Literal
@@ -61,6 +61,9 @@ class HookedViT(HookedRootModule):
                 for block_index in range(self.cfg.n_layers)
             ]
         )
+        if "dino" in self.cfg.model_name:
+            self.post_layernorm = LayerNorm(self.cfg)
+        
         self.classifier_head = ViTHead(cfg)
 
         self.hook_full_embed = HookPoint()
@@ -114,8 +117,14 @@ class HookedViT(HookedRootModule):
         for block in self.blocks:
             resid = block(resid)
 
+        if "dino" in self.cfg.model_name:
+            resid = self.post_layernorm(resid)
+
         # Get CLS Token
         cls_tok = resid[:, 0, :]
+        if "dino" in self.cfg.model_name:
+            patch_tokens = resid[:, 1:, :]
+            cls_tok = torch.cat([cls_tok, patch_tokens.mean(dim=1)], dim=1)
         logits = self.classifier_head(cls_tok)
 
         if return_type is None:
@@ -237,6 +246,25 @@ class HookedViT(HookedRootModule):
         print(f"Loaded pretrained model {model_name} into HookedTransformer")
 
         return model
+    
+    def tokens_to_residual_directions(self, labels: torch.Tensor) -> torch.Tensor:
+        """
+        Computes the residual directions for given labels.
+
+        Args:
+            labels (torch.Tensor): A 1D tensor of label indices with shape (batch_size,).
+
+        Returns:
+            torch.Tensor: The residual directions with shape (batch_size, d_model).
+        """
+
+        answer_residual_directions = self.classifier_head.W.T[:,labels] 
+
+        answer_residual_directions = rearrange(
+            answer_residual_directions, "d_model ... -> ... d_model"
+        )
+        
+        return answer_residual_directions
 
     @property
     def W_E(self) -> Float[torch.Tensor, "d_vocab d_model"]:

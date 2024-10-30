@@ -39,6 +39,7 @@ class HookedViTConfig:
 
     Args:
         d_model (int): The dimensionality of the embeddings.
+        d_classifier_input (int): The number of input dimensions to the classifier head.
         d_head (int): The dimensionality of each attention head.
         n_layers (int): The number of transformer blocks (one block = one attn layer AND one MLP layer).
         n_heads (int): The number of attention heads. If not
@@ -127,11 +128,13 @@ class HookedViTConfig:
         num_channels (int, *optional*): The number of input channels. Defaults to 3.
         is_clip (bool, *optional*): Whether we're loading from a CLIP model
         force_projection_bias (bool, *optional*): Whether to force the visual projection to have a bias term
+        add_task_token (bool, *optional*): Whether to add an extra patch/token to represent an input task index
 
     """
 
     n_layers: int
     d_model: int
+    d_classifier_input: int
     d_head: int
     model_name: str = "custom"
     n_heads: int = -1
@@ -175,6 +178,8 @@ class HookedViTConfig:
     n_ctx: int = 196
     is_clip: bool = False
     force_projection_bias: bool = False
+    add_task_token: bool = False
+    layerscale_value: float = -1.0
 
     def __post_init__(self):
         assert (
